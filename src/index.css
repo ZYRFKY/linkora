@@ -1,0 +1,94 @@
+
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, "Helvetica Neue", Arial, sans-serif;
+  color: #292B27;
+  background: #F7F7F3;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button, input, textarea, select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: #DCE5D9;
+  color: #344B38;
+}
+
+.form-input {
+  display: block;
+  width: 100%;
+  border: 1px solid #E3E3DB;
+  border-radius: 8px;
+  padding: 11px 13px;
+  background: #FBFAF6;
+  color: #292B27;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.form-input::placeholder {
+  color: #A5A69D;
+}
+
+.form-input:focus {
+  border-color: #82977E;
+  background: #FFFFFF;
+}
+
+.form-input:focus-visible {
+  outline: 2px solid #DCE5D9;
+  outline-offset: 1px;
+}
+
+textarea.form-input {
+  line-height: 1.6;
+}
+
+select.form-input {
+  cursor: pointer;
+}
+
+button, a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+img {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
