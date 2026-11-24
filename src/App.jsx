@@ -1,3 +1,4 @@
+import { supabase } from "./lib/supabase";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 
@@ -11,7 +12,7 @@ import {
 
 
   ExternalLink, PanelLeft, Check, FolderPlus, Download, Upload,
-  Command, Eye, Clock3, Sparkles, Globe2
+  Command, Eye, Clock3, Sparkles, Globe2, LogOut
 
 
 } from "lucide-react";
@@ -926,8 +927,6 @@ function BookmarkItem({
                 >
                   <ExternalLink size={13} /> Open website
                 </a>
-
-
                 <button
 
 
@@ -1008,8 +1007,7 @@ function BookmarkItem({
 }
 
 
-function App() {
-
+function App({ user }) {
 
   const [bookmarks, setBookmarks] = useState(() =>
 
@@ -1083,6 +1081,190 @@ function App() {
   const [collectionModal, setCollectionModal] = useState(null);
   const [previewBookmark, setPreviewBookmark] = useState(null);
   const [recentVisits, setRecentVisits] = useState(() => readStorage("linkora-recent-visits", []));
+  
+  const [cloudReady, setCloudReady] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState("Connecting to cloud...");
+  const [collectionIds, setCollectionIds] = useState({});
+  const [syncError, setSyncError] = useState("");
+
+  // Load data dari tabel relasional Supabase. localStorage hanya dimigrasikan
+  // jika library akun ini memang masih kosong.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLibrary() {
+      setCloudReady(false);
+      setCloudStatus("Connecting to cloud...");
+      setSyncError("");
+
+      try {
+        const [collectionsResult, bookmarksResult] = await Promise.all([
+          supabase.from("collections").select("id, name, color, created_at").eq("user_id", user.id).order("created_at", { ascending: true }),
+          supabase.from("bookmarks").select("id, user_id, collection_id, title, url, description, favicon, is_favorite, created_at, updated_at").eq("user_id", user.id).order("created_at", { ascending: false })
+        ]);
+
+        if (collectionsResult.error) throw collectionsResult.error;
+        if (bookmarksResult.error) throw bookmarksResult.error;
+
+        let cloudCollections = collectionsResult.data || [];
+        let cloudBookmarks = bookmarksResult.data || [];
+
+        // Migrasi satu kali dari localStorage hanya bila akun cloud masih kosong.
+        if (cloudCollections.length === 0 && cloudBookmarks.length === 0) {
+          const localBookmarks = readStorage("linkora-bookmarks", INITIAL_BOOKMARKS);
+          const localCollections = readStorage("linkora-collections", DEFAULT_COLLECTIONS);
+          const safeBookmarks = Array.isArray(localBookmarks) ? localBookmarks : INITIAL_BOOKMARKS;
+          const names = [...new Set([
+            ...DEFAULT_COLLECTIONS,
+            ...(Array.isArray(localCollections) ? localCollections : []),
+            ...safeBookmarks.map(item => item.category || "Other")
+          ])];
+
+          if (names.length) {
+            const rows = names.map(name => ({
+              id: crypto.randomUUID(), user_id: user.id, name,
+              color: "#78917D"
+            }));
+            const { data, error } = await supabase.from("collections").insert(rows).select("id, name, color, created_at");
+            if (error) throw error;
+            cloudCollections = data || [];
+          }
+
+          const idsByName = Object.fromEntries(cloudCollections.map(item => [item.name, item.id]));
+          const bookmarkRows = safeBookmarks.map((item, index) => ({
+            id: crypto.randomUUID(),
+            user_id: user.id,
+            collection_id: idsByName[item.category || "Other"] || null,
+            title: item.title || "Untitled",
+            url: item.url || "",
+            description: item.description || null,
+            favicon: item.favicon || getFavicon(item.url || ""),
+            is_favorite: Boolean(item.favorite),
+            created_at: item.date || new Date(Date.now() - index * 1000).toISOString(),
+            updated_at: new Date().toISOString()
+          })).filter(item => item.url);
+
+          if (bookmarkRows.length) {
+            const { data, error } = await supabase.from("bookmarks").insert(bookmarkRows).select("id, user_id, collection_id, title, url, description, favicon, is_favorite, created_at, updated_at");
+            if (error) throw error;
+            cloudBookmarks = data || [];
+          }
+        }
+
+        // Jika koleksi belum ada tetapi bookmark cloud sudah ada, buat kategori
+        // yang diperlukan tanpa menimpa bookmark yang sudah tersimpan.
+        const existingNames = new Set(cloudCollections.map(item => item.name));
+        const neededNames = [...new Set(cloudBookmarks.map(item => item.collection_id).filter(Boolean))];
+        if (neededNames.length) {
+          const missingIds = neededNames.filter(id => !cloudCollections.some(item => item.id === id));
+          if (missingIds.length) console.warn("Some bookmark collection references are missing:", missingIds);
+        }
+        const namesById = Object.fromEntries(cloudCollections.map(item => [item.id, item.name]));
+        const mappedBookmarks = cloudBookmarks.map(item => ({
+          id: item.id,
+          title: item.title,
+          url: item.url,
+          description: item.description || "",
+          category: namesById[item.collection_id] || "Other",
+          favorite: Boolean(item.is_favorite),
+          color: "#526B57",
+          date: item.created_at || item.updated_at
+        }));
+        const mappedCollections = cloudCollections.map(item => item.name);
+        const ids = Object.fromEntries(cloudCollections.map(item => [item.name, item.id]));
+
+        if (cancelled) return;
+        setBookmarks(mappedBookmarks);
+        setCollections([...new Set([...DEFAULT_COLLECTIONS, ...mappedCollections, ...mappedBookmarks.map(item => item.category)])]);
+        setCollectionIds(ids);
+        setCloudReady(true);
+        setCloudStatus("Synced to cloud");
+      } catch (error) {
+        console.error("Cloud library error:", error);
+        if (!cancelled) {
+          setSyncError(error.message || "Could not load cloud library");
+          setCloudStatus("Cloud sync unavailable");
+          window.alert("Could not load your cloud library: " + (error.message || "Unknown error"));
+        }
+      }
+    }
+
+    loadLibrary();
+    return () => { cancelled = true; };
+  }, [user.id]);
+
+  // Simpan snapshot library ke tabel relasional. Proses berurutan menjaga relasi
+  // collection_id tetap valid dan menghapus baris yang memang dihapus dari UI.
+  useEffect(() => {
+    if (!cloudReady) return;
+
+    const timeout = setTimeout(async () => {
+      try {
+        setCloudStatus("Syncing...");
+        setSyncError("");
+
+        let idsByName = { ...collectionIds };
+        const collectionRows = collections.map(name => ({
+          id: idsByName[name] || crypto.randomUUID(),
+          user_id: user.id,
+          name,
+          color: "#78917D"
+        }));
+        idsByName = Object.fromEntries(collectionRows.map(row => [row.name, row.id]));
+
+        if (collectionRows.length) {
+          const { error } = await supabase.from("collections").upsert(collectionRows, { onConflict: "id" });
+          if (error) throw error;
+        }
+
+        const bookmarkRows = bookmarks.map(item => ({
+          id: item.id,
+          user_id: user.id,
+          collection_id: idsByName[item.category] || idsByName.Other || null,
+          title: item.title,
+          url: item.url,
+          description: item.description || null,
+          favicon: item.favicon || getFavicon(item.url),
+          is_favorite: Boolean(item.favorite),
+          created_at: item.date || new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }));
+
+        if (bookmarkRows.length) {
+          const { error } = await supabase.from("bookmarks").upsert(bookmarkRows, { onConflict: "id" });
+          if (error) throw error;
+        }
+
+        const { data: savedBookmarks, error: readBookmarksError } = await supabase.from("bookmarks").select("id").eq("user_id", user.id);
+        if (readBookmarksError) throw readBookmarksError;
+        const keepBookmarkIds = new Set(bookmarkRows.map(row => row.id));
+        const staleBookmarkIds = (savedBookmarks || []).map(row => row.id).filter(id => !keepBookmarkIds.has(id));
+        if (staleBookmarkIds.length) {
+          const { error } = await supabase.from("bookmarks").delete().eq("user_id", user.id).in("id", staleBookmarkIds);
+          if (error) throw error;
+        }
+
+        const { data: savedCollections, error: readCollectionsError } = await supabase.from("collections").select("id").eq("user_id", user.id);
+        if (readCollectionsError) throw readCollectionsError;
+        const keepCollectionIds = new Set(collectionRows.map(row => row.id));
+        const staleCollectionIds = (savedCollections || []).map(row => row.id).filter(id => !keepCollectionIds.has(id));
+        if (staleCollectionIds.length) {
+          const { error } = await supabase.from("collections").delete().eq("user_id", user.id).in("id", staleCollectionIds);
+          if (error) throw error;
+        }
+
+        setCollectionIds(idsByName);
+        setCloudStatus("Synced to cloud");
+      } catch (error) {
+        console.error("Cloud sync error:", error);
+        setSyncError(error.message || "Cloud sync failed");
+        setCloudStatus("Sync error");
+      }
+    }, 700);
+
+    return () => clearTimeout(timeout);
+  }, [cloudReady, user.id, bookmarks, collections]);
+
   const searchInputRef = useRef(null);
   const importInputRef = useRef(null);
 
@@ -1113,21 +1295,15 @@ function App() {
 
 
   useEffect(() => {
-
-
+    if (!cloudReady) return;
     localStorage.setItem("linkora-bookmarks", JSON.stringify(bookmarks));
-
-
-  }, [bookmarks]);
+  }, [bookmarks, cloudReady]);
 
 
   useEffect(() => {
-
-
+    if (!cloudReady) return;
     localStorage.setItem("linkora-collections", JSON.stringify(collections));
-
-
-  }, [collections]);
+  }, [collections, cloudReady]);
 
   useEffect(() => {
     localStorage.setItem("linkora-recent-visits", JSON.stringify(recentVisits));
@@ -1375,7 +1551,8 @@ function App() {
         item && typeof item.title === "string" && typeof item.url === "string"
       ).map((item, index) => ({
         ...item,
-        id: item.id ?? Date.now() + index,
+        id: crypto.randomUUID(),
+        date: item.date || new Date().toISOString(),
         category: item.category || "Other",
         favorite: Boolean(item.favorite),
         description: item.description || ""
@@ -1502,7 +1679,7 @@ const saveBookmark = event => {
       url,
 
 
-      id: Date.now(),
+      id: crypto.randomUUID(),
 
 
       date: new Date().toISOString(),
@@ -1670,13 +1847,14 @@ const saveBookmark = event => {
     }
 
 
-    setCollections(old =>
+    setCollectionIds(old => {
+      const next = { ...old };
+      if (next[oldName]) next[newName] = next[oldName];
+      delete next[oldName];
+      return next;
+    });
 
-
-      old.map(item => item === oldName ? newName : item)
-
-
-    );
+    setCollections(old => old.map(item => item === oldName ? newName : item));
 
 
     setBookmarks(old =>
@@ -1745,6 +1923,11 @@ const saveBookmark = event => {
     if (!confirmed) return;
 
 
+    setCollectionIds(old => {
+      const next = { ...old };
+      delete next[name];
+      return next;
+    });
     setCollections(old => old.filter(item => item !== name));
 
 
@@ -2208,10 +2391,11 @@ const saveBookmark = event => {
             <p className="text-[10px] text-[#B0B0A6] mt-3">
 
 
-              LINKORA · VERSION 2.1
-
-
+              LINKORA · VERSION 2.2 · {user.email}
             </p>
+            <button onClick={async () => { const { error } = await supabase.auth.signOut(); if (error) window.alert(error.message); }} className="mt-3 inline-flex items-center gap-2 text-[11px] text-[#777970] hover:text-[#526B57]">
+              <LogOut size={13} /> Sign out
+            </button>
 
 
           </div>
@@ -2244,15 +2428,13 @@ const saveBookmark = event => {
             </div>
 
 
-            <div className="flex items-center gap-2 text-[11px] text-[#999B91]">
-
-
-              <span className="w-1.5 h-1.5 rounded-full bg-[#82977E]" />
-
-
-              Everything saved locally
-
-
+            <div className="flex items-center gap-3 text-[11px] text-[#999B91]">
+              <span className={`w-1.5 h-1.5 rounded-full ${cloudStatus === "Synced to cloud" ? "bg-[#82977E]" : cloudStatus === "Sync error" || cloudStatus === "Cloud sync unavailable" ? "bg-[#B66A5D]" : "bg-[#C59A54]"}`} />
+              <span title={syncError || cloudStatus}>{cloudStatus}</span>
+              <span className="hidden xl:inline max-w-[180px] truncate">{user.email}</span>
+              <button onClick={async () => { const { error } = await supabase.auth.signOut(); if (error) window.alert(error.message); }} className="inline-flex items-center gap-1.5 px-3 py-2 border border-[#E5E5DD] rounded-lg hover:bg-[#ECEFE9] text-[#777970]">
+                <LogOut size={13} /> Sign out
+              </button>
             </div>
 
 
