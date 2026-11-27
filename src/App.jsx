@@ -2893,7 +2893,7 @@ const saveBookmark = event => {
               <p className="text-[10px] text-[#A0A196]">
 
 
-                Made for the curious.
+                Made With Heart From Zya RZ.
 
 
               </p>
@@ -2902,7 +2902,7 @@ const saveBookmark = event => {
               <p className="text-[10px] text-[#A0A196]">
 
 
-                LINKORA © 2026
+                LINKORA © 2026 - present
 
 
               </p>
